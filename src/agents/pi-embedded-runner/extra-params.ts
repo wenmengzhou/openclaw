@@ -15,10 +15,18 @@ export function resolveExtraParams(params: {
   cfg: MoltbotConfig | undefined;
   provider: string;
   modelId: string;
+  modelReasoning?: boolean;
 }): Record<string, unknown> | undefined {
   const modelKey = `${params.provider}/${params.modelId}`;
   const modelConfig = params.cfg?.agents?.defaults?.models?.[modelKey];
-  return modelConfig?.params ? { ...modelConfig.params } : undefined;
+  const baseParams = modelConfig?.params ? { ...modelConfig.params } : {};
+
+  // Auto-inject enable_thinking for reasoning-capable models
+  if (params.modelReasoning && !('enable_thinking' in baseParams)) {
+    baseParams.enable_thinking = true;
+  }
+
+  return Object.keys(baseParams).length > 0 ? baseParams : undefined;
 }
 
 type CacheControlTtl = "5m" | "1h";
@@ -45,7 +53,11 @@ function createStreamFnWithExtraParams(
     return undefined;
   }
 
-  const streamParams: Partial<SimpleStreamOptions> & { cacheControlTtl?: CacheControlTtl } = {};
+  const streamParams: Partial<SimpleStreamOptions> & {
+    cacheControlTtl?: CacheControlTtl;
+    [key: string]: unknown;
+  } = {};
+
   if (typeof extraParams.temperature === "number") {
     streamParams.temperature = extraParams.temperature;
   }
@@ -55,6 +67,13 @@ function createStreamFnWithExtraParams(
   const cacheControlTtl = resolveCacheControlTtl(extraParams, provider, modelId);
   if (cacheControlTtl) {
     streamParams.cacheControlTtl = cacheControlTtl;
+  }
+
+  // Pass through any additional params (like enable_thinking for OpenAI-compatible APIs)
+  for (const [key, value] of Object.entries(extraParams)) {
+    if (key !== 'temperature' && key !== 'maxTokens' && key !== 'cacheControlTtl' && value !== undefined) {
+      streamParams[key] = value;
+    }
   }
 
   if (Object.keys(streamParams).length === 0) {
@@ -84,11 +103,13 @@ export function applyExtraParamsToAgent(
   provider: string,
   modelId: string,
   extraParamsOverride?: Record<string, unknown>,
+  modelReasoning?: boolean,
 ): void {
   const extraParams = resolveExtraParams({
     cfg,
     provider,
     modelId,
+    modelReasoning,
   });
   const override =
     extraParamsOverride && Object.keys(extraParamsOverride).length > 0
