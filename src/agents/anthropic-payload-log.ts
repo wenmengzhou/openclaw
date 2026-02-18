@@ -9,7 +9,7 @@ import { parseBooleanValue } from "../utils/boolean.js";
 import { safeJsonStringify } from "../utils/safe-json.js";
 import { getQueuedFileWriter, type QueuedFileWriter } from "./queued-file-writer.js";
 
-type PayloadLogStage = "request" | "usage";
+type PayloadLogStage = "request" | "usage" | "response";
 
 type PayloadLogEvent = {
   ts: string;
@@ -29,6 +29,7 @@ type PayloadLogEvent = {
 
 type PayloadLogConfig = {
   enabled: boolean;
+  allProviders: boolean;
   filePath: string;
 };
 
@@ -38,12 +39,17 @@ const writers = new Map<string, PayloadLogWriter>();
 const log = createSubsystemLogger("agent/anthropic-payload");
 
 function resolvePayloadLogConfig(env: NodeJS.ProcessEnv): PayloadLogConfig {
-  const enabled = parseBooleanValue(env.OPENCLAW_ANTHROPIC_PAYLOAD_LOG) ?? false;
-  const fileOverride = env.OPENCLAW_ANTHROPIC_PAYLOAD_LOG_FILE?.trim();
+  const anthropicEnabled = parseBooleanValue(env.OPENCLAW_ANTHROPIC_PAYLOAD_LOG) ?? false;
+  const allEnabled = parseBooleanValue(env.OPENCLAW_PAYLOAD_LOG) ?? false;
+  const enabled = anthropicEnabled || allEnabled;
+
+  const fileOverride = (
+    env.OPENCLAW_PAYLOAD_LOG_FILE ?? env.OPENCLAW_ANTHROPIC_PAYLOAD_LOG_FILE
+  )?.trim();
   const filePath = fileOverride
     ? resolveUserPath(fileOverride)
     : path.join(resolveStateDir(env), "logs", "anthropic-payload.jsonl");
-  return { enabled, filePath };
+  return { enabled, allProviders: allEnabled, filePath };
 }
 
 function getWriter(filePath: string): PayloadLogWriter {
@@ -88,10 +94,21 @@ function findLastAssistantUsage(messages: AgentMessage[]): Record<string, unknow
   return null;
 }
 
+function findLastAssistantMessage(messages: AgentMessage[]): AgentMessage | null {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const msg = messages[i] as { role?: unknown };
+    if (msg?.role === "assistant") {
+      return messages[i];
+    }
+  }
+  return null;
+}
+
 export type AnthropicPayloadLogger = {
   enabled: true;
   wrapStreamFn: (streamFn: StreamFn) => StreamFn;
   recordUsage: (messages: AgentMessage[], error?: unknown) => void;
+  recordResponse: (messages: AgentMessage[]) => void;
 };
 
 export function createAnthropicPayloadLogger(params: {
@@ -131,7 +148,7 @@ export function createAnthropicPayloadLogger(params: {
 
   const wrapStreamFn: AnthropicPayloadLogger["wrapStreamFn"] = (streamFn) => {
     const wrapped: StreamFn = (model, context, options) => {
-      if (!isAnthropicModel(model)) {
+      if (!cfg.allProviders && !isAnthropicModel(model)) {
         return streamFn(model, context, options);
       }
       const nextOnPayload = (payload: unknown) => {
@@ -180,6 +197,19 @@ export function createAnthropicPayloadLogger(params: {
     });
   };
 
+  const recordResponse: AnthropicPayloadLogger["recordResponse"] = (messages) => {
+    const lastAssistant = findLastAssistantMessage(messages);
+    if (!lastAssistant) {
+      return;
+    }
+    record({
+      ...base,
+      ts: new Date().toISOString(),
+      stage: "response",
+      payload: lastAssistant,
+    });
+  };
+
   log.info("anthropic payload logger enabled", { filePath: writer.filePath });
-  return { enabled: true, wrapStreamFn, recordUsage };
+  return { enabled: true, wrapStreamFn, recordUsage, recordResponse };
 }
