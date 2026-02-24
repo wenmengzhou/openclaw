@@ -1,0 +1,43 @@
+diff --git a/dist/providers/anthropic.js b/dist/providers/anthropic.js
+index 0bf2b894799bbc9ef5fda07bc44ea4301c9f395a..76f0df9b815adf577a6595a783cf4a0b08b07eda 100644
+--- a/dist/providers/anthropic.js
++++ b/dist/providers/anthropic.js
+@@ -150,6 +150,10 @@ export const streamAnthropic = (model, context, options) => {
+             const blocks = output.content;
+             for await (const event of anthropicStream) {
+                 if (event.type === "message_start") {
++                    // Capture response ID from the message_start event
++                    if (event.message.id && !output.responseId) {
++                        output.responseId = event.message.id;
++                    }
+                     // Capture initial token usage from message_start event
+                     // This ensures we have input token counts even if the stream is aborted early
+                     output.usage.input = event.message.usage.input_tokens || 0;
+diff --git a/dist/providers/openai-completions.js b/dist/providers/openai-completions.js
+index 8c974317b88de3103d664c321e79bd6e6aa0f169..6f5a5497270e160195b15994ad6c86bbcd5a0e27 100644
+--- a/dist/providers/openai-completions.js
++++ b/dist/providers/openai-completions.js
+@@ -104,6 +104,9 @@ export const streamOpenAICompletions = (model, context, options) => {
+                 }
+             };
+             for await (const chunk of openaiStream) {
++                if (chunk.id && !output.responseId) {
++                    output.responseId = chunk.id;
++                }
+                 if (chunk.usage) {
+                     const cachedTokens = chunk.usage.prompt_tokens_details?.cached_tokens || 0;
+                     const reasoningTokens = chunk.usage.completion_tokens_details?.reasoning_tokens || 0;
+diff --git a/dist/providers/openai-responses-shared.js b/dist/providers/openai-responses-shared.js
+index 00c580181f377cb81a3324573950e3ffa1d77751..43c5072bbc98d2b31a5ca9fe55dfa6144a5e0586 100644
+--- a/dist/providers/openai-responses-shared.js
++++ b/dist/providers/openai-responses-shared.js
+@@ -372,6 +372,9 @@ export async function processResponsesStream(openaiStream, output, stream, model
+         }
+         else if (event.type === "response.completed") {
+             const response = event.response;
++            if (response?.id && !output.responseId) {
++                output.responseId = response.id;
++            }
+             if (response?.usage) {
+                 const cachedTokens = response.usage.input_tokens_details?.cached_tokens || 0;
+                 output.usage = {
