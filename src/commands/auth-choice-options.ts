@@ -127,7 +127,7 @@ const AUTH_CHOICE_GROUP_DEFS: {
   },
   {
     value: "modelstudio",
-    label: "Alibaba Cloud Model Studio",
+    label: "Qwen (Alibaba Cloud Model Studio)",
     hint: "Standard / Coding Plan (CN / Global)",
     choices: [
       "modelstudio-standard-api-key-cn",
