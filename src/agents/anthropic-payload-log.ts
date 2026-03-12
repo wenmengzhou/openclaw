@@ -84,6 +84,33 @@ function isAnthropicModel(model: Model<Api> | undefined | null): boolean {
   return (model as { api?: unknown })?.api === "anthropic-messages";
 }
 
+async function extractFirstSseChunk(response: Response): Promise<Record<string, unknown> | null> {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    return null;
+  }
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const match = buffer.match(/^data:\s*(\{.+\})/m);
+      if (match) {
+        return JSON.parse(match[1]);
+      }
+    }
+  } catch {
+    return null;
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+  return null;
+}
+
 function findLastAssistantUsage(messages: AgentMessage[]): Record<string, unknown> | null {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const msg = messages[i] as { role?: unknown; usage?: unknown };
@@ -146,6 +173,8 @@ export function createAnthropicPayloadLogger(params: {
     writer.write(`${line}\n`);
   };
 
+  let responseMeta: Record<string, unknown> | null = null;
+
   const wrapStreamFn: AnthropicPayloadLogger["wrapStreamFn"] = (streamFn) => {
     const wrapped: StreamFn = (model, context, options) => {
       if (!cfg.allProviders && !isAnthropicModel(model)) {
@@ -161,10 +190,61 @@ export function createAnthropicPayloadLogger(params: {
         });
         options?.onPayload?.(payload);
       };
-      return streamFn(model, context, {
+
+      // One-shot fetch interceptor to capture SSE metadata
+      responseMeta = null;
+      const originalFetch = globalThis.fetch;
+      let intercepted = false;
+
+      globalThis.fetch = async (input, init) => {
+        const response = await originalFetch(input, init);
+        if (!intercepted) {
+          const ct = response.headers.get("content-type") ?? "";
+          if (ct.includes("text/event-stream")) {
+            intercepted = true;
+            globalThis.fetch = originalFetch;
+            try {
+              const clone = response.clone();
+              extractFirstSseChunk(clone)
+                .then((chunk) => {
+                  if (chunk) {
+                    responseMeta = {
+                      id: chunk.id,
+                      model: chunk.model,
+                      created: chunk.created,
+                      system_fingerprint: chunk.system_fingerprint,
+                      object: chunk.object,
+                    };
+                  }
+                })
+                .catch(() => {});
+            } catch {
+              // ignore clone/parse errors
+            }
+          }
+        }
+        return response;
+      };
+
+      const restoreTimer = setTimeout(() => {
+        if (!intercepted) {
+          globalThis.fetch = originalFetch;
+        }
+      }, 30_000);
+
+      const stream = streamFn(model, context, {
         ...options,
         onPayload: nextOnPayload,
       });
+
+      void (stream as unknown as { result?: () => Promise<unknown> }).result?.().finally(() => {
+        clearTimeout(restoreTimer);
+        if (!intercepted) {
+          globalThis.fetch = originalFetch;
+        }
+      });
+
+      return stream;
     };
     return wrapped;
   };
@@ -206,8 +286,12 @@ export function createAnthropicPayloadLogger(params: {
       ...base,
       ts: new Date().toISOString(),
       stage: "response",
-      payload: lastAssistant,
+      payload: {
+        ...responseMeta,
+        ...(lastAssistant as unknown as Record<string, unknown>),
+      },
     });
+    responseMeta = null;
   };
 
   log.info("anthropic payload logger enabled", { filePath: writer.filePath });
