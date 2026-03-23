@@ -189,21 +189,104 @@ export const SkillsBinsResultSchema = Type.Object(
   { additionalProperties: false },
 );
 
-export const SkillsInstallParamsSchema = Type.Object(
+export const SkillsInstallParamsSchema = Type.Union([
+  Type.Object(
+    {
+      name: NonEmptyString,
+      installId: NonEmptyString,
+      timeoutMs: Type.Optional(Type.Integer({ minimum: 1000 })),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      source: Type.Literal("clawhub"),
+      slug: NonEmptyString,
+      version: Type.Optional(NonEmptyString),
+      force: Type.Optional(Type.Boolean()),
+      timeoutMs: Type.Optional(Type.Integer({ minimum: 1000 })),
+    },
+    { additionalProperties: false },
+  ),
+]);
+
+export const SkillsUpdateParamsSchema = Type.Union([
+  Type.Object(
+    {
+      skillKey: NonEmptyString,
+      enabled: Type.Optional(Type.Boolean()),
+      apiKey: Type.Optional(Type.String()),
+      env: Type.Optional(Type.Record(NonEmptyString, Type.String())),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      source: Type.Literal("clawhub"),
+      slug: Type.Optional(NonEmptyString),
+      all: Type.Optional(Type.Boolean()),
+    },
+    { additionalProperties: false },
+  ),
+]);
+
+export const ToolsCatalogParamsSchema = Type.Object(
   {
-    name: NonEmptyString,
-    installId: NonEmptyString,
-    timeoutMs: Type.Optional(Type.Integer({ minimum: 1000 })),
+    agentId: Type.Optional(NonEmptyString),
+    includePlugins: Type.Optional(Type.Boolean()),
   },
   { additionalProperties: false },
 );
 
-export const SkillsUpdateParamsSchema = Type.Object(
+export const ToolCatalogProfileSchema = Type.Object(
   {
-    skillKey: NonEmptyString,
-    enabled: Type.Optional(Type.Boolean()),
-    apiKey: Type.Optional(Type.String()),
-    env: Type.Optional(Type.Record(NonEmptyString, Type.String())),
+    id: Type.Union([
+      Type.Literal("minimal"),
+      Type.Literal("coding"),
+      Type.Literal("messaging"),
+      Type.Literal("full"),
+    ]),
+    label: NonEmptyString,
+  },
+  { additionalProperties: false },
+);
+
+export const ToolCatalogEntrySchema = Type.Object(
+  {
+    id: NonEmptyString,
+    label: NonEmptyString,
+    description: Type.String(),
+    source: Type.Union([Type.Literal("core"), Type.Literal("plugin")]),
+    pluginId: Type.Optional(NonEmptyString),
+    optional: Type.Optional(Type.Boolean()),
+    defaultProfiles: Type.Array(
+      Type.Union([
+        Type.Literal("minimal"),
+        Type.Literal("coding"),
+        Type.Literal("messaging"),
+        Type.Literal("full"),
+      ]),
+    ),
+  },
+  { additionalProperties: false },
+);
+
+export const ToolCatalogGroupSchema = Type.Object(
+  {
+    id: NonEmptyString,
+    label: NonEmptyString,
+    source: Type.Union([Type.Literal("core"), Type.Literal("plugin")]),
+    pluginId: Type.Optional(NonEmptyString),
+    tools: Type.Array(ToolCatalogEntrySchema),
+  },
+  { additionalProperties: false },
+);
+
+export const ToolsCatalogResultSchema = Type.Object(
+  {
+    agentId: NonEmptyString,
+    profiles: Type.Array(ToolCatalogProfileSchema),
+    groups: Type.Array(ToolCatalogGroupSchema),
   },
   { additionalProperties: false },
 );

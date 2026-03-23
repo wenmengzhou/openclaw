@@ -17,7 +17,8 @@ vi.mock("./store.js", () => ({
   loadSessionStore: () => storeState.store,
 }));
 
-import { extractDeliveryInfo } from "./delivery-info.js";
+let extractDeliveryInfo: typeof import("./delivery-info.js").extractDeliveryInfo;
+let parseSessionThreadInfo: typeof import("./delivery-info.js").parseSessionThreadInfo;
 
 const buildEntry = (deliveryContext: SessionEntry["deliveryContext"]): SessionEntry => ({
   sessionId: "session-1",
@@ -25,11 +26,32 @@ const buildEntry = (deliveryContext: SessionEntry["deliveryContext"]): SessionEn
   deliveryContext,
 });
 
-beforeEach(() => {
+beforeEach(async () => {
+  vi.resetModules();
   storeState.store = {};
+  ({ extractDeliveryInfo, parseSessionThreadInfo } = await import("./delivery-info.js"));
 });
 
 describe("extractDeliveryInfo", () => {
+  it("parses base session and thread/topic ids", () => {
+    expect(parseSessionThreadInfo("agent:main:telegram:group:1:topic:55")).toEqual({
+      baseSessionKey: "agent:main:telegram:group:1",
+      threadId: "55",
+    });
+    expect(parseSessionThreadInfo("agent:main:slack:channel:C1:thread:123.456")).toEqual({
+      baseSessionKey: "agent:main:slack:channel:C1",
+      threadId: "123.456",
+    });
+    expect(parseSessionThreadInfo("agent:main:telegram:dm:user-1")).toEqual({
+      baseSessionKey: "agent:main:telegram:dm:user-1",
+      threadId: undefined,
+    });
+    expect(parseSessionThreadInfo(undefined)).toEqual({
+      baseSessionKey: undefined,
+      threadId: undefined,
+    });
+  });
+
   it("returns deliveryContext for direct session keys", () => {
     const sessionKey = "agent:main:webchat:dm:user-123";
     storeState.store[sessionKey] = buildEntry({

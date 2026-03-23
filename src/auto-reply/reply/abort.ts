@@ -1,7 +1,8 @@
+import { getAcpSessionManager } from "../../acp/control-plane/manager.js";
 import { resolveSessionAgentId } from "../../agents/agent-scope.js";
 import { abortEmbeddedPiRun } from "../../agents/pi-embedded.js";
 import {
-  listSubagentRunsForRequester,
+  listSubagentRunsForController,
   markSubagentRunTerminated,
 } from "../../agents/subagent-registry.js";
 import {
@@ -11,6 +12,7 @@ import {
 import type { OpenClawConfig } from "../../config/config.js";
 import {
   loadSessionStore,
+  resolveSessionStoreEntry,
   resolveStorePath,
   type SessionEntry,
   updateSessionStore,
@@ -18,81 +20,32 @@ import {
 import { logVerbose } from "../../globals.js";
 import { parseAgentSessionKey } from "../../routing/session-key.js";
 import { resolveCommandAuthorization } from "../command-auth.js";
-import { normalizeCommandBody, type CommandNormalizeOptions } from "../commands-registry.js";
 import type { FinalizedMsgContext, MsgContext } from "../templating.js";
+import {
+  applyAbortCutoffToSessionEntry,
+  resolveAbortCutoffFromContext,
+  shouldPersistAbortCutoff,
+} from "./abort-cutoff.js";
+import {
+  getAbortMemory,
+  getAbortMemorySizeForTest,
+  isAbortRequestText,
+  isAbortTrigger,
+  resetAbortMemoryForTest,
+  setAbortMemory,
+} from "./abort-primitives.js";
 import { stripMentions, stripStructuralPrefixes } from "./mentions.js";
 import { clearSessionQueues } from "./queue.js";
 
-const ABORT_TRIGGERS = new Set(["stop", "esc", "abort", "wait", "exit", "interrupt"]);
-const ABORT_MEMORY = new Map<string, boolean>();
-const ABORT_MEMORY_MAX = 2000;
-
-export function isAbortTrigger(text?: string): boolean {
-  if (!text) {
-    return false;
-  }
-  const normalized = text.trim().toLowerCase();
-  return ABORT_TRIGGERS.has(normalized);
-}
-
-export function isAbortRequestText(text?: string, options?: CommandNormalizeOptions): boolean {
-  if (!text) {
-    return false;
-  }
-  const normalized = normalizeCommandBody(text, options).trim();
-  if (!normalized) {
-    return false;
-  }
-  return normalized.toLowerCase() === "/stop" || isAbortTrigger(normalized);
-}
-
-export function getAbortMemory(key: string): boolean | undefined {
-  const normalized = key.trim();
-  if (!normalized) {
-    return undefined;
-  }
-  return ABORT_MEMORY.get(normalized);
-}
-
-function pruneAbortMemory(): void {
-  if (ABORT_MEMORY.size <= ABORT_MEMORY_MAX) {
-    return;
-  }
-  const excess = ABORT_MEMORY.size - ABORT_MEMORY_MAX;
-  let removed = 0;
-  for (const entryKey of ABORT_MEMORY.keys()) {
-    ABORT_MEMORY.delete(entryKey);
-    removed += 1;
-    if (removed >= excess) {
-      break;
-    }
-  }
-}
-
-export function setAbortMemory(key: string, value: boolean): void {
-  const normalized = key.trim();
-  if (!normalized) {
-    return;
-  }
-  if (!value) {
-    ABORT_MEMORY.delete(normalized);
-    return;
-  }
-  // Refresh insertion order so active keys are less likely to be evicted.
-  if (ABORT_MEMORY.has(normalized)) {
-    ABORT_MEMORY.delete(normalized);
-  }
-  ABORT_MEMORY.set(normalized, true);
-  pruneAbortMemory();
-}
-
-export function getAbortMemorySizeForTest(): number {
-  return ABORT_MEMORY.size;
-}
-
-export function resetAbortMemoryForTest(): void {
-  ABORT_MEMORY.clear();
-}
+export { resolveAbortCutoffFromContext, shouldSkipMessageByAbortCutoff } from "./abort-cutoff.js";
+export {
+  getAbortMemory,
+  getAbortMemorySizeForTest,
+  isAbortRequestText,
+  isAbortTrigger,
+  resetAbortMemoryForTest,
+  setAbortMemory,
+};
 
 export function formatAbortReplyText(stoppedSubagents?: number): string {
   if (typeof stoppedSubagents !== "number" || stoppedSubagents <= 0) {
@@ -102,16 +55,25 @@ export function formatAbortReplyText(stoppedSubagents?: number): string {
   return `⚙️ Agent was aborted. Stopped ${stoppedSubagents} ${label}.`;
 }
 
-function resolveSessionEntryForKey(
+export function resolveSessionEntryForKey(
   store: Record<string, SessionEntry> | undefined,
   sessionKey: string | undefined,
-) {
+): { entry?: SessionEntry; key?: string; legacyKeys?: string[] } {
   if (!store || !sessionKey) {
     return {};
   }
-  const direct = store[sessionKey];
-  if (direct) {
-    return { entry: direct, key: sessionKey };
+  const resolved = resolveSessionStoreEntry({ store, sessionKey });
+  if (resolved.existing) {
+    return resolved.legacyKeys.length > 0
+      ? {
+          entry: resolved.existing,
+          key: resolved.normalizedKey,
+          legacyKeys: resolved.legacyKeys,
+        }
+      : {
+          entry: resolved.existing,
+          key: resolved.normalizedKey,
+        };
   }
   return {};
 }
@@ -145,7 +107,7 @@ export function stopSubagentsForRequester(params: {
   if (!requesterKey) {
     return { stopped: 0 };
   }
-  const runs = listSubagentRunsForRequester(requesterKey);
+  const runs = listSubagentRunsForController(requesterKey);
   if (runs.length === 0) {
     return { stopped: 0 };
   }
@@ -234,27 +196,64 @@ export async function tryFastAbortFromMessage(params: {
   if (targetKey) {
     const storePath = resolveStorePath(cfg.session?.store, { agentId });
     const store = loadSessionStore(storePath);
-    const { entry, key } = resolveSessionEntryForKey(store, targetKey);
+    const { entry, key, legacyKeys } = resolveSessionEntryForKey(store, targetKey);
+    const resolvedTargetKey = key ?? targetKey;
+    const acpManager = getAcpSessionManager();
+    const acpResolution = acpManager.resolveSession({
+      cfg,
+      sessionKey: resolvedTargetKey,
+    });
+    if (acpResolution.kind !== "none") {
+      try {
+        await acpManager.cancelSession({
+          cfg,
+          sessionKey: resolvedTargetKey,
+          reason: "fast-abort",
+        });
+      } catch (error) {
+        logVerbose(
+          `abort: ACP cancel failed for ${resolvedTargetKey}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
     const sessionId = entry?.sessionId;
     const aborted = sessionId ? abortEmbeddedPiRun(sessionId) : false;
-    const cleared = clearSessionQueues([key ?? targetKey, sessionId]);
+    const cleared = clearSessionQueues([resolvedTargetKey, sessionId]);
     if (cleared.followupCleared > 0 || cleared.laneCleared > 0) {
       logVerbose(
         `abort: cleared followups=${cleared.followupCleared} lane=${cleared.laneCleared} keys=${cleared.keys.join(",")}`,
       );
     }
+    const abortCutoff = shouldPersistAbortCutoff({
+      commandSessionKey: ctx.SessionKey,
+      targetSessionKey: resolvedTargetKey,
+    })
+      ? resolveAbortCutoffFromContext(ctx)
+      : undefined;
     if (entry && key) {
       entry.abortedLastRun = true;
+      applyAbortCutoffToSessionEntry(entry, abortCutoff);
       entry.updatedAt = Date.now();
       store[key] = entry;
+      for (const legacyKey of legacyKeys ?? []) {
+        if (legacyKey !== key) {
+          delete store[legacyKey];
+        }
+      }
       await updateSessionStore(storePath, (nextStore) => {
         const nextEntry = nextStore[key] ?? entry;
         if (!nextEntry) {
           return;
         }
         nextEntry.abortedLastRun = true;
+        applyAbortCutoffToSessionEntry(nextEntry, abortCutoff);
         nextEntry.updatedAt = Date.now();
         nextStore[key] = nextEntry;
+        for (const legacyKey of legacyKeys ?? []) {
+          if (legacyKey !== key) {
+            delete nextStore[legacyKey];
+          }
+        }
       });
     } else if (abortKey) {
       setAbortMemory(abortKey, true);

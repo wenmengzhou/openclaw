@@ -1,4 +1,6 @@
 import type { OpenClawConfig } from "../config/config.js";
+import { resolveGlobalSingleton } from "../shared/global-singleton.js";
+import { notifyListeners, registerListener } from "../shared/listeners.js";
 
 export type DiagnosticSessionState = "idle" | "processing" | "waiting";
 
@@ -167,34 +169,63 @@ export type DiagnosticEventInput = DiagnosticEventPayload extends infer Event
     ? Omit<Event, "seq" | "ts">
     : never
   : never;
-let seq = 0;
-const listeners = new Set<(evt: DiagnosticEventPayload) => void>();
+
+type DiagnosticEventsGlobalState = {
+  seq: number;
+  listeners: Set<(evt: DiagnosticEventPayload) => void>;
+  dispatchDepth: number;
+};
+
+const DIAGNOSTIC_EVENTS_STATE_KEY = Symbol.for("openclaw.diagnosticEvents.state");
+
+const state = resolveGlobalSingleton<DiagnosticEventsGlobalState>(
+  DIAGNOSTIC_EVENTS_STATE_KEY,
+  () => ({
+    seq: 0,
+    listeners: new Set<(evt: DiagnosticEventPayload) => void>(),
+    dispatchDepth: 0,
+  }),
+);
 
 export function isDiagnosticsEnabled(config?: OpenClawConfig): boolean {
   return config?.diagnostics?.enabled === true;
 }
 
 export function emitDiagnosticEvent(event: DiagnosticEventInput) {
+  if (state.dispatchDepth > 100) {
+    console.error(
+      `[diagnostic-events] recursion guard tripped at depth=${state.dispatchDepth}, dropping type=${event.type}`,
+    );
+    return;
+  }
+
   const enriched = {
     ...event,
-    seq: (seq += 1),
+    seq: (state.seq += 1),
     ts: Date.now(),
   } satisfies DiagnosticEventPayload;
-  for (const listener of listeners) {
-    try {
-      listener(enriched);
-    } catch {
-      // Ignore listener failures.
-    }
-  }
+  state.dispatchDepth += 1;
+  notifyListeners(state.listeners, enriched, (err) => {
+    const errorMessage =
+      err instanceof Error
+        ? (err.stack ?? err.message)
+        : typeof err === "string"
+          ? err
+          : String(err);
+    console.error(
+      `[diagnostic-events] listener error type=${enriched.type} seq=${enriched.seq}: ${errorMessage}`,
+    );
+    // Ignore listener failures.
+  });
+  state.dispatchDepth -= 1;
 }
 
 export function onDiagnosticEvent(listener: (evt: DiagnosticEventPayload) => void): () => void {
-  listeners.add(listener);
-  return () => listeners.delete(listener);
+  return registerListener(state.listeners, listener);
 }
 
 export function resetDiagnosticEventsForTest(): void {
-  seq = 0;
-  listeners.clear();
+  state.seq = 0;
+  state.listeners.clear();
+  state.dispatchDepth = 0;
 }

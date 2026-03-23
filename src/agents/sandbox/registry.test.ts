@@ -124,8 +124,10 @@ beforeEach(() => {
 
 afterEach(async () => {
   vi.restoreAllMocks();
-  await fs.rm(TEST_STATE_DIR, { recursive: true, force: true });
-  await fs.mkdir(TEST_STATE_DIR, { recursive: true });
+  await fs.rm(SANDBOX_REGISTRY_PATH, { force: true });
+  await fs.rm(SANDBOX_BROWSER_REGISTRY_PATH, { force: true });
+  await fs.rm(`${SANDBOX_REGISTRY_PATH}.lock`, { force: true });
+  await fs.rm(`${SANDBOX_BROWSER_REGISTRY_PATH}.lock`, { force: true });
 });
 
 afterAll(async () => {
@@ -170,6 +172,28 @@ async function seedBrowserRegistry(entries: SandboxBrowserRegistryEntry[]) {
 }
 
 describe("registry race safety", () => {
+  it("normalizes legacy registry entries on read", async () => {
+    await seedContainerRegistry([
+      {
+        containerName: "legacy-container",
+        sessionKey: "agent:main",
+        createdAtMs: 1,
+        lastUsedAtMs: 1,
+        image: "openclaw-sandbox:test",
+      },
+    ]);
+
+    const registry = await readRegistry();
+    expect(registry.entries).toEqual([
+      expect.objectContaining({
+        containerName: "legacy-container",
+        backendId: "docker",
+        runtimeLabel: "legacy-container",
+        configLabelKind: "Image",
+      }),
+    ]);
+  });
+
   it("keeps both container updates under concurrent writes", async () => {
     await Promise.all([
       updateRegistry(containerEntry({ containerName: "container-a" })),
